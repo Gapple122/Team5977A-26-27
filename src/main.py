@@ -15,5 +15,9 @@ brain=Brain()
 
 brain.screen.print("Hello V5")
 
+motor1 = Motor(Ports.PORT1) 
+
+motor1.spin_for(5, SECONDS) 
+
 
         
