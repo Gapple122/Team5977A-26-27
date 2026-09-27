@@ -10,19 +10,43 @@
 
 using namespace vex;
 
-// A global instance of vex::brain used for printing to the V5 brain screen
-vex::brain       Brain;
+brain Brain;
+controller Controller1 = controller(primary);
 
-// define your global instances of motors and other devices here
+motor LeftFront  = motor(PORT1, gearSetting::ratio6_1, false);
+motor LeftBack   = motor(PORT2, gearSetting::ratio6_1, false);
+motor RightFront = motor(PORT3, gearSetting::ratio6_1, true);
+motor RightBack  = motor(PORT4, gearSetting::ratio6_1, true);
 
+motor_group LeftDrive  = motor_group(LeftFront, LeftBack);
+motor_group RightDrive = motor_group(RightFront, RightBack);
 
 int main() {
+    Brain.Screen.print("Split Arcade Drive Ready");
 
-    Brain.Screen.printAt( 10, 50, "Hello V5" );
-   
-    while(1) {
-        
-        // Allow other tasks to run
-        this_thread::sleep_for(10);
+    LeftDrive.setStopping(coast);
+    RightDrive.setStopping(coast);
+
+    while (true) {
+        int fwdAxis = Controller1.Axis3.position(); // left stick, vertical
+        int turnAxis = Controller1.Axis1.position(); // right stick, horizontal
+
+        int leftPower  = fwdAxis + turnAxis;
+        int rightPower = fwdAxis - turnAxis;
+
+        if (leftPower > 100) leftPower = 100;
+        if (leftPower < -100) leftPower = -100;
+        if (rightPower > 100) rightPower = 100;
+        if (rightPower < -100) rightPower = -100;
+
+        // Set velocity first (magnitude), then spin in the forward direction.
+        // Negative velocity values will make it spin backward automatically.
+        LeftDrive.setVelocity(leftPower, percent);
+        RightDrive.setVelocity(rightPower, percent);
+
+        LeftDrive.spin(forward);
+        RightDrive.spin(forward);
+
+        wait(20, msec);
     }
 }
