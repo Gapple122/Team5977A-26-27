@@ -8,3 +8,16 @@ git reset --hard origin/main
 
 git clean -fdn
 
+##Team members
+paul
+
+rlijah
+
+noah
+
+pranesh
+
+marcellus
+
+tyrell
+
