@@ -7,6 +7,7 @@
 /*                                                                            */
 /*----------------------------------------------------------------------------*/
 #include "vex.h"
+#include <cmath>
 //mangos
 
 using namespace vex;
@@ -22,26 +23,38 @@ motor RightBack  = motor(PORT1, gearSetting::ratio6_1, false);
 motor_group LeftDrive  = motor_group(LeftFront, LeftBack);
 motor_group RightDrive = motor_group(RightFront, RightBack);
 
-int main() {
-    Brain.Screen.print("Split Arcade Drive Ready");
+// Higher = gentler turning near center. 1.0 = linear, 2.0 = squared, 3.0 = cubed.
+const double TURN_CURVE = 2.5;
+const int DEADBAND = 5; // ignore tiny stick drift
 
-    LeftDrive.setStopping(coast);
-    RightDrive.setStopping(coast);
+// Maps -100..100 input to -100..100 output along a power curve, keeping the sign.
+double curve(int input, double exponent) {
+    if (abs(input) < DEADBAND) return 0;
+    double normalized = abs(input) / 100.0;           // 0.0 to 1.0
+    double output = pow(normalized, exponent) * 100;  // curved 0 to 100
+    return (input < 0) ? -output : output;
+}
+
+int main() {
+    Brain.Screen.print("Paul detected activating pual attack mode");
+
+    LeftDrive.setStopping(brake);
+    RightDrive.setStopping(brake);
 
     while (true) {
-        int fwdAxis = Controller1.Axis3.position(); // left stick, vertical
+        int fwdAxis  = Controller1.Axis3.position(); // left stick, vertical
         int turnAxis = Controller1.Axis1.position(); // right stick, horizontal
 
-        int leftPower  = fwdAxis + turnAxis;
-        int rightPower = fwdAxis - turnAxis;
+        double turn = curve(turnAxis, TURN_CURVE);
+
+        double leftPower  = fwdAxis + turn;
+        double rightPower = fwdAxis - turn;
 
         if (leftPower > 100) leftPower = 100;
         if (leftPower < -100) leftPower = -100;
         if (rightPower > 100) rightPower = 100;
         if (rightPower < -100) rightPower = -100;
 
-        // Set velocity first (magnitude), then spin in the forward direction.
-        // Negative velocity values will make it spin backward automatically.
         LeftDrive.setVelocity(leftPower, percent);
         RightDrive.setVelocity(rightPower, percent);
 
