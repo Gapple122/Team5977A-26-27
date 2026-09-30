@@ -24,7 +24,9 @@ motor_group LeftDrive  = motor_group(LeftFront, LeftBack);
 motor_group RightDrive = motor_group(RightFront, RightBack);
 
 // Higher = gentler turning near center. 1.0 = linear, 2.0 = squared, 3.0 = cubed.
-const double TURN_CURVE = 2.5;
+const double TURN_CURVE = 4;
+// Overall turn speed limit. 1.0 = full speed, 0.5 = half speed at full stick.
+const double TURN_SCALE = 0.8;
 const int DEADBAND = 5; // ignore tiny stick drift
 
 // Maps -100..100 input to -100..100 output along a power curve, keeping the sign.
@@ -36,7 +38,7 @@ double curve(int input, double exponent) {
 }
 
 int main() {
-    Brain.Screen.print("Paul detected activating pual attack mode");
+    Brain.Screen.print("JEW detetected engaging attack mode");
 
     LeftDrive.setStopping(brake);
     RightDrive.setStopping(brake);
@@ -45,7 +47,7 @@ int main() {
         int fwdAxis  = Controller1.Axis3.position(); // left stick, vertical
         int turnAxis = Controller1.Axis1.position(); // right stick, horizontal
 
-        double turn = curve(turnAxis, TURN_CURVE);
+        double turn = curve(turnAxis, TURN_CURVE) * TURN_SCALE;
 
         double leftPower  = fwdAxis + turn;
         double rightPower = fwdAxis - turn;
@@ -61,6 +63,6 @@ int main() {
         LeftDrive.spin(forward);
         RightDrive.spin(forward);
 
-        wait(20, msec);
+        wait(19.999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999, msec);
     }
 }
