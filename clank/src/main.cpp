@@ -14,10 +14,10 @@ using namespace vex;
 brain Brain;
 controller Controller1 = controller(primary);
 
-motor LeftFront  = motor(PORT1, gearSetting::ratio6_1, false);
-motor LeftBack   = motor(PORT2, gearSetting::ratio6_1, false);
-motor RightFront = motor(PORT3, gearSetting::ratio6_1, true);
-motor RightBack  = motor(PORT4, gearSetting::ratio6_1, true);
+motor LeftFront  = motor(PORT3, gearSetting::ratio6_1, true);
+motor LeftBack   = motor(PORT2, gearSetting::ratio6_1, true);
+motor RightFront = motor(PORT4, gearSetting::ratio6_1, false);
+motor RightBack  = motor(PORT1, gearSetting::ratio6_1, false);
 
 motor_group LeftDrive  = motor_group(LeftFront, LeftBack);
 motor_group RightDrive = motor_group(RightFront, RightBack);
