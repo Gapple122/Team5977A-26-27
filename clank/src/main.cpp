@@ -130,47 +130,81 @@ int  portType[MAX_PORT + 1];
 
 /*----------------------------------------------------------------------------*/
 /*  Brain screen GUI                                                          */
-/*  Left column = page buttons. Right panel = data.                           */
-/*  Page 0 = HOME (all 21 ports). Page 1 = ALL motors summary.                */
-/*  Pages 2-5 = one motor, with PORT +/- and REV buttons on the right edge.   */
+/*                                                                            */
+/*  HOME = Smart Port grid. Tap a tile to inspect that port.                  */
+/*  SWITCH PORTS enables motor port reassignment by tapping a motor and then  */
+/*  a destination port. Motor assignments swap when the destination is busy. */
+/*  3WIRE = A-H list.                                                        */
 /*----------------------------------------------------------------------------*/
 
-const int NUM_PAGES = NUM_MOTORS + 2;   // HOME + ALL + each motor
-const char* buttonLabels[NUM_PAGES] = { "HOME", "ALL", "LF", "LB", "RF", "RB" };
+const int NUM_3WIRE = 8;
+const char* threeWireNames[NUM_3WIRE] = {
+    "A", "B", "C", "D", "E", "F", "G", "H"
+};
+
+/*
+ * 3-Wire devices cannot be generically identified from the Brain like Smart
+ * Port devices. These names are therefore labels for configured connections.
+ * Change them to match the devices used by your robot.
+ *
+ * Example:
+ *   "Limit Switch"
+ *   "Potentiometer"
+ *   "Encoder (A+B)"
+ */
+const char* threeWireDevices[NUM_3WIRE] = {
+    "Not configured", "Not configured", "Not configured", "Not configured",
+    "Not configured", "Not configured", "Not configured", "Not configured"
+};
+
+const int NUM_PAGES = NUM_MOTORS + 3;   // HOME + 3WIRE + HELP + each motor
+const char* buttonLabels[NUM_PAGES] = {
+    "HOME", "3WIRE", "MOTORS", "LF", "LB", "RF", "RB"
+};
 
 const int BTN_X = 0;
 const int BTN_W = 100;
-const int BTN_H = 240 / NUM_PAGES;   // 40 px each
+const int BTN_H = 240 / NUM_PAGES;
 const int PANEL_X = 110;
 
-// Port/reverse buttons (shown on motor pages only)
-const int PBTN_X = 365;
-const int PBTN_W = 110;
-const int PBTN_H = 48;
-const int PBTN_PLUS_Y  = 40;
-const int PBTN_MINUS_Y = 98;
-const int PBTN_REV_Y   = 156;
-
-// HOME port grid: 7 columns x 3 rows = 21 tiles
+/* Smart-port grid: 7 columns x 3 rows = 21 tiles */
 const int TILE_COLS = 7;
 const int TILE_ROWS = 3;
-const int TILE_W  = 52;
-const int TILE_H  = 58;
+const int TILE_W = 50;
+const int TILE_H = 52;
 const int TILE_X0 = 112;
-const int TILE_Y0 = 36;
+const int TILE_Y0 = 48;
+
+/* Smart-port detail panel */
+const int DETAIL_X = 112;
+const int DETAIL_Y = 208;
+const int SWITCH_X = 365;
+const int SWITCH_Y = 8;
+const int SWITCH_W = 105;
+const int SWITCH_H = 30;
 
 int currentPage = 0;
-int selectedMotor = -1;   // motor picked on the HOME screen, waiting for a new port
+int selectedMotor = -1;       // Motor selected while SWITCH PORTS is enabled
+int selectedPort = -1;        // Port whose details are displayed
+bool switchPortsMode = false;
 
-// Snapshot of motor readings, so drawing never holds the lock the drive loop needs.
+/* Snapshot of motor readings, so drawing never holds the lock the drive loop needs. */
 struct MotorData {
     bool installed;
     double temp, rpm, amps, volts, torque, watts, eff, pos;
 };
 MotorData snap[NUM_MOTORS];
 
+/* Generic Smart-Port information. */
+struct PortData {
+    bool installed;
+    int type;
+};
+PortData portSnap[MAX_PORT + 1];
+
 void takeSnapshot() {
     motorLock.lock();
+
     for (int i = 0; i < NUM_MOTORS; i++) {
         motor& m = *motors[i];
         snap[i].installed = m.installed();
@@ -183,15 +217,29 @@ void takeSnapshot() {
         snap[i].eff    = m.efficiency(percent);
         snap[i].pos    = m.position(degrees);
     }
+
     motorLock.unlock();
 
     for (int p = MIN_PORT; p <= MAX_PORT; p++) {
-        portInstalled[p] = probes[p]->installed();
-        portType[p] = portInstalled[p] ? (int)probes[p]->type() : 0;
+        portSnap[p].installed = probes[p]->installed();
+        portSnap[p].type = portSnap[p].installed ? (int)probes[p]->type() : 0;
+
+        // Keep the old arrays updated too.
+        portInstalled[p] = portSnap[p].installed;
+        portType[p] = portSnap[p].type;
     }
 }
 
-// Green = cool, yellow = warm, red = hot (V5 motors throttle around 55C+).
+/* Generic type names for the most useful/common Smart-Port cases. */
+const char* deviceTypeName(int type) {
+    switch (type) {
+        case 0: return "None";
+        case DEVICE_TYPE_MOTOR: return "Motor";
+        default: return "Device";
+    }
+}
+
+/* Green = cool, yellow = warm, red = hot. */
 color tempColor(double tempC) {
     if (tempC < 45) return color::green;
     if (tempC < 55) return color::yellow;
@@ -206,29 +254,38 @@ void drawButton(int x, int y, int w, int h, const char* label, color fill) {
     Brain.Screen.setPenColor(color::white);
     Brain.Screen.setFillColor(fill);
     Brain.Screen.drawRectangle(x, y, w, h);
-    Brain.Screen.printAt(x + 10, y + h / 2 + 7, true, "%s", label);
+    Brain.Screen.printAt(x + 8, y + h / 2 + 7, true, "%s", label);
 }
 
 void drawPageButtons() {
-    Brain.Screen.setFont(mono20);
+    Brain.Screen.setFont(mono15);
+
     for (int i = 0; i < NUM_PAGES; i++) {
         drawButton(BTN_X, i * BTN_H, BTN_W, BTN_H, buttonLabels[i],
                    i == currentPage ? color::blue : color(50, 50, 50));
     }
 }
 
-void drawHomePage() {
+void drawSmartPortGrid() {
     Brain.Screen.setFillColor(color::black);
     Brain.Screen.setPenColor(color::cyan);
     Brain.Screen.setFont(mono20);
-    Brain.Screen.printAt(PANEL_X + 10, 24, "PORTS");
+    Brain.Screen.printAt(PANEL_X + 10, 25, true, "SMART PORTS");
 
     Brain.Screen.setFont(mono15);
-    Brain.Screen.setPenColor(color::white);
-    if (selectedMotor >= 0) {
-        Brain.Screen.printAt(PANEL_X + 90, 22, true, "Move %s: tap new port", motorNames[selectedMotor]);
+    drawButton(SWITCH_X, SWITCH_Y, SWITCH_W, SWITCH_H,
+               switchPortsMode ? "MOVE: ON" : "SWITCH PORTS",
+               switchPortsMode ? color(0, 110, 0) : color(60, 60, 60));
+
+    if (switchPortsMode) {
+        Brain.Screen.setPenColor(color::yellow);
+        Brain.Screen.printAt(PANEL_X + 10, 42, true, "Tap motor, then destination");
+    } else if (selectedPort >= MIN_PORT && selectedPort <= MAX_PORT) {
+        Brain.Screen.setPenColor(color::white);
+        Brain.Screen.printAt(PANEL_X + 10, 42, true, "Tap a port for details");
     } else {
-        Brain.Screen.printAt(PANEL_X + 90, 22, "Tap a motor to move it");
+        Brain.Screen.setPenColor(color::white);
+        Brain.Screen.printAt(PANEL_X + 10, 42, true, "Tap any port");
     }
 
     for (int p = MIN_PORT; p <= MAX_PORT; p++) {
@@ -238,78 +295,179 @@ void drawHomePage() {
         int y = TILE_Y0 + row * TILE_H;
 
         int m = motorAtPort(p);
-        color fill = color(40, 40, 40);      // empty port
+
+        color fill = color(40, 40, 40);
         const char* label = "";
 
         if (m >= 0) {
-            fill  = snap[m].installed ? color(0, 110, 0) : color(140, 0, 0);
-            label = buttonLabels[m + 2];     // LF / LB / RF / RB
-        } else if (portInstalled[p]) {
-            fill  = color(0, 70, 140);       // something plugged in that the code doesn't use
-            label = (portType[p] == DEVICE_TYPE_MOTOR) ? "mtr" : "dev";
+            fill = snap[m].installed ? color(0, 110, 0) : color(140, 0, 0);
+            label = buttonLabels[m + 3];
+        } else if (portSnap[p].installed) {
+            fill = color(0, 70, 140);
+            label = deviceTypeName(portSnap[p].type);
         }
 
-        bool selected = (m >= 0 && m == selectedMotor);
-        Brain.Screen.setPenWidth(selected ? 3 : 1);
-        Brain.Screen.setPenColor(selected ? color::yellow : color(90, 90, 90));
+        bool selected = (selectedPort == p);
+        bool selectedMoveMotor = (selectedMotor >= 0 && m == selectedMotor);
+
+        Brain.Screen.setPenWidth((selected || selectedMoveMotor) ? 3 : 1);
+        Brain.Screen.setPenColor(
+            (selected || selectedMoveMotor) ? color::yellow : color(90, 90, 90)
+        );
         Brain.Screen.setFillColor(fill);
         Brain.Screen.drawRectangle(x, y, TILE_W - 2, TILE_H - 2);
 
         Brain.Screen.setPenColor(color::white);
         Brain.Screen.setFont(mono20);
-        Brain.Screen.printAt(x + 6, y + 24, "%2d", p);
+        Brain.Screen.printAt(x + 5, y + 22, true, "%2d", p);
+
+        Brain.Screen.setFont(mono15);
         if (label[0] != '\0') {
-            Brain.Screen.setFont(mono15);
-            Brain.Screen.printAt(x + 6, y + 46, true, "%s", label);
+            Brain.Screen.printAt(x + 4, y + 43, true, "%s", label);
         }
     }
-    Brain.Screen.setPenWidth(1);
 
+    Brain.Screen.setPenWidth(1);
+    Brain.Screen.setFont(mono15);
+
+    /* Detail area below the grid. */
     Brain.Screen.setFillColor(color::black);
     Brain.Screen.setPenColor(color::white);
-    Brain.Screen.setFont(mono15);
-    Brain.Screen.printAt(PANEL_X + 10, 232, "green=ok red=missing blue=unassigned");
+
+    if (selectedMotor >= 0 && switchPortsMode) {
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y, true,
+            "Moving %s from P%d",
+            motorNames[selectedMotor], motorPorts[selectedMotor]);
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 20, true, "Tap destination or MOVE to cancel");
+        return;
+    }
+
+    if (selectedPort < MIN_PORT || selectedPort > MAX_PORT) {
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y, true, "No port selected");
+        return;
+    }
+
+    int p = selectedPort;
+    int m = motorAtPort(p);
+
+    Brain.Screen.setPenColor(color::cyan);
+    Brain.Screen.printAt(DETAIL_X, DETAIL_Y, true, "PORT %d", p);
+
+    Brain.Screen.setPenColor(color::white);
+
+    if (m >= 0) {
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 20, true, "Assigned: %s", motorNames[m]);
+
+        if (!snap[m].installed) {
+            Brain.Screen.setPenColor(color::red);
+            Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 40, true, "Motor not detected");
+        } else {
+            Brain.Screen.setPenColor(tempColor(snap[m].temp));
+            Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 40, true, "Motor: %.0fC %.0f rpm", snap[m].temp, snap[m].rpm);
+        }
+    } else if (portSnap[p].installed) {
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 20, true, "Device: %s", deviceTypeName(portSnap[p].type));
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 40, true, "Type ID: %d", portSnap[p].type);
+    } else {
+        Brain.Screen.printAt(DETAIL_X, DETAIL_Y + 20, true, "No device detected");
+    }
 }
 
-void drawSummaryPage() {
+void drawThreeWirePage() {
     Brain.Screen.setFillColor(color::black);
     Brain.Screen.setPenColor(color::cyan);
     Brain.Screen.setFont(mono20);
-    Brain.Screen.printAt(PANEL_X + 10, 24, "ALL MOTORS");
+    Brain.Screen.printAt(PANEL_X + 10, 24, true, "3-WIRE PORTS");
 
-    Brain.Screen.setPenColor(color::white);
     Brain.Screen.setFont(mono15);
-    Brain.Screen.printAt(PANEL_X + 10,  54, "Motor");
-    Brain.Screen.printAt(PANEL_X + 90,  54, "Port");
-    Brain.Screen.printAt(PANEL_X + 140, 54, "Temp");
-    Brain.Screen.printAt(PANEL_X + 195, 54, "RPM");
-    Brain.Screen.printAt(PANEL_X + 250, 54, "Amps");
+    Brain.Screen.setPenColor(color::white);
+    Brain.Screen.printAt(PANEL_X + 10, 40, true, "Select a port for its configured connection");
 
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        int y = 84 + i * 30;
+    const int colW = 168;
+    const int rowH = 34;
+    const int listY = 48;
 
-        Brain.Screen.setPenColor(color::white);
-        Brain.Screen.printAt(PANEL_X + 10, y, true, "%-8s", motorNames[i]);
+    for (int i = 0; i < NUM_3WIRE; i++) {
+        int col = i / 4;
+        int row = i % 4;
+        int x = PANEL_X + 8 + col * (colW + 8);
+        int y = listY + row * rowH;
+        bool selected = (selectedPort == -(i + 1));
 
-        Brain.Screen.setPenColor(portInUse(i) ? color::red : color::white);
-        Brain.Screen.printAt(PANEL_X + 90, y, "%2d", motorPorts[i]);
-
-        if (!snap[i].installed) {
-            Brain.Screen.setPenColor(color::red);
-            Brain.Screen.printAt(PANEL_X + 140, y, "not detected");
-            continue;
-        }
-
-        Brain.Screen.setPenColor(tempColor(snap[i].temp));
-        Brain.Screen.printAt(PANEL_X + 140, y, "%3.0fC", snap[i].temp);
+        Brain.Screen.setPenColor(selected ? color::yellow : color(90, 90, 90));
+        Brain.Screen.setFillColor(selected ? color(70, 70, 20) : color(35, 35, 35));
+        Brain.Screen.drawRectangle(x, y, colW, rowH - 3);
 
         Brain.Screen.setPenColor(color::white);
-        Brain.Screen.printAt(PANEL_X + 195, y, "%4.0f", snap[i].rpm);
-        Brain.Screen.printAt(PANEL_X + 250, y, "%4.2f", snap[i].amps);
+        Brain.Screen.setFont(mono20);
+        Brain.Screen.printAt(x + 8, y + 23, true, "%c", 'A' + i);
+
+        Brain.Screen.setFont(mono15);
+        Brain.Screen.printAt(x + 38, y + 15, true, "%s", threeWireDevices[i]);
     }
 
-    Brain.Screen.setPenColor(color::orange);
-    Brain.Screen.printAt(PANEL_X + 10, 220, "paul detetected engaging attack mode");
+    Brain.Screen.setFont(mono15);
+    Brain.Screen.setPenColor(color::cyan);
+
+    if (selectedPort < 0 && selectedPort >= -NUM_3WIRE) {
+        int i = -selectedPort - 1;
+        Brain.Screen.printAt(PANEL_X + 10, 198, true, "Port %c", 'A' + i);
+
+        Brain.Screen.setPenColor(color::white);
+        Brain.Screen.printAt(PANEL_X + 10, 218, true, "Connection: %s", threeWireDevices[i]);
+    } else {
+        Brain.Screen.setPenColor(color::white);
+        Brain.Screen.printAt(PANEL_X + 10, 198, true, "No 3-wire port selected");
+    }
+
+    Brain.Screen.setFont(mono15);
+    Brain.Screen.setPenColor(color(150, 150, 150));
+    Brain.Screen.printAt(PANEL_X + 10, 236, true, "3-wire hardware is not generically auto-detectable");
+}
+
+void drawMotorSummaryPage() {
+    Brain.Screen.setFillColor(color::black);
+    Brain.Screen.setPenColor(color::cyan);
+    Brain.Screen.setFont(mono20);
+    Brain.Screen.printAt(PANEL_X + 10, 24, true, "MOTOR GRID");
+
+    const int cols = 2;
+    const int w = 125;
+    const int h = 78;
+    const int x0 = PANEL_X + 8;
+    const int y0 = 48;
+
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        int col = i % cols;
+        int row = i / cols;
+        int x = x0 + col * (w + 8);
+        int y = y0 + row * (h + 8);
+
+        bool selected = (selectedMotor == i && switchPortsMode);
+
+        Brain.Screen.setPenWidth(selected ? 3 : 1);
+        Brain.Screen.setPenColor(selected ? color::yellow : color(90, 90, 90));
+        Brain.Screen.setFillColor(snap[i].installed ? color(0, 90, 0) : color(110, 0, 0));
+        Brain.Screen.drawRectangle(x, y, w, h);
+
+        Brain.Screen.setPenColor(color::white);
+        Brain.Screen.setFont(mono15);
+        Brain.Screen.printAt(x + 8, y + 20, true, "%s", motorNames[i]);
+        Brain.Screen.printAt(x + 8, y + 40, true, "Port: %d", motorPorts[i]);
+
+        if (snap[i].installed) {
+            Brain.Screen.printAt(x + 8, y + 60, true, "%.0fC %.0f rpm",
+                                 snap[i].temp, snap[i].rpm);
+        } else {
+            Brain.Screen.setPenColor(color::red);
+            Brain.Screen.printAt(x + 8, y + 60, true, "NOT DETECTED");
+        }
+    }
+
+    Brain.Screen.setPenWidth(1);
+    Brain.Screen.setFont(mono15);
+    Brain.Screen.setPenColor(color::white);
+    Brain.Screen.printAt(PANEL_X + 10, 224, true, "Use HOME > SWITCH PORTS to move assignments");
 }
 
 void drawMotorPage(int idx) {
@@ -318,101 +476,166 @@ void drawMotorPage(int idx) {
     Brain.Screen.setFillColor(color::black);
     Brain.Screen.setFont(mono20);
 
-    // Title turns red if two motors are assigned to the same port
     Brain.Screen.setPenColor(portInUse(idx) ? color::red : color::cyan);
-    Brain.Screen.printAt(PANEL_X + 10, 24, true, "%s  (port %d)", motorNames[idx], motorPorts[idx]);
+    Brain.Screen.printAt(PANEL_X + 10, 24, true,
+        "%s  (port %d)", motorNames[idx], motorPorts[idx]);
 
     if (!d.installed) {
         Brain.Screen.setPenColor(color::red);
-        Brain.Screen.printAt(PANEL_X + 10, 62, "NOT DETECTED");
+        Brain.Screen.printAt(PANEL_X + 10, 62, true, "NOT DETECTED");
         Brain.Screen.setPenColor(color::white);
-        Brain.Screen.printAt(PANEL_X + 10, 90, "Try PORT + / -");
+        Brain.Screen.printAt(PANEL_X + 10, 90, true, "Use HOME to switch ports");
     } else {
         Brain.Screen.setPenColor(tempColor(d.temp));
-        Brain.Screen.printAt(PANEL_X + 10, 54, "Temp:       %3.0f C", d.temp);
+        Brain.Screen.printAt(PANEL_X + 10, 54, true, "Temp:       %3.0f C", d.temp);
 
         Brain.Screen.setPenColor(color::white);
-        Brain.Screen.printAt(PANEL_X + 10,  78, "Velocity:   %5.0f rpm", d.rpm);
-        Brain.Screen.printAt(PANEL_X + 10, 102, "Current:    %5.2f A",   d.amps);
-        Brain.Screen.printAt(PANEL_X + 10, 126, "Voltage:    %5.2f V",   d.volts);
-        Brain.Screen.printAt(PANEL_X + 10, 150, "Torque:     %5.2f Nm",  d.torque);
-        Brain.Screen.printAt(PANEL_X + 10, 174, "Power:      %5.1f W",   d.watts);
-        Brain.Screen.printAt(PANEL_X + 10, 198, "Efficiency: %5.0f %%",  d.eff);
-        Brain.Screen.printAt(PANEL_X + 10, 222, "Position:   %5.0f deg", d.pos);
+        Brain.Screen.printAt(PANEL_X + 10, 78, true, "Velocity:   %5.0f rpm", d.rpm);
+        Brain.Screen.printAt(PANEL_X + 10, 102, true, "Current:    %5.2f A", d.amps);
+        Brain.Screen.printAt(PANEL_X + 10, 126, true, "Voltage:    %5.2f V", d.volts);
+        Brain.Screen.printAt(PANEL_X + 10, 150, true, "Torque:     %5.2f Nm", d.torque);
+        Brain.Screen.printAt(PANEL_X + 10, 174, true, "Power:      %5.1f W", d.watts);
+        Brain.Screen.printAt(PANEL_X + 10, 198, true, "Efficiency: %5.0f %%", d.eff);
+        Brain.Screen.printAt(PANEL_X + 10, 222, true, "Position:   %5.0f deg", d.pos);
     }
-
-    // Port / reverse controls
-    Brain.Screen.setFont(mono20);
-    drawButton(PBTN_X, PBTN_PLUS_Y,  PBTN_W, PBTN_H, "PORT +", color(0, 110, 0));
-    drawButton(PBTN_X, PBTN_MINUS_Y, PBTN_W, PBTN_H, "PORT -", color(130, 0, 0));
-    drawButton(PBTN_X, PBTN_REV_Y,   PBTN_W, PBTN_H,
-               motorReversed[idx] ? "REV: YES" : "REV: NO", color(70, 70, 70));
-    Brain.Screen.setFillColor(color::black);
 }
 
-void handleHomeTouch(int x, int y) {
-    if (!inRect(x, y, TILE_X0, TILE_Y0, TILE_COLS * TILE_W, TILE_ROWS * TILE_H)) return;
+void handleSmartGridTouch(int x, int y) {
+    if (inRect(x, y, SWITCH_X, SWITCH_Y, SWITCH_W, SWITCH_H)) {
+        switchPortsMode = !switchPortsMode;
+        selectedMotor = -1;
+        selectedPort = -1;
+        return;
+    }
+
+    if (!inRect(x, y, TILE_X0, TILE_Y0,
+                TILE_COLS * TILE_W, TILE_ROWS * TILE_H)) {
+        return;
+    }
 
     int col = (x - TILE_X0) / TILE_W;
     int row = (y - TILE_Y0) / TILE_H;
     int port = row * TILE_COLS + col + 1;
+
     if (port < MIN_PORT || port > MAX_PORT) return;
 
-    if (selectedMotor < 0) {
-        // Nothing selected yet: tapping a motor's port selects it
-        selectedMotor = motorAtPort(port);   // -1 if the port has no motor assigned
-    } else if (port == motorPorts[selectedMotor]) {
-        selectedMotor = -1;                  // tapped it again: cancel
+    int m = motorAtPort(port);
+
+    if (switchPortsMode) {
+        if (selectedMotor < 0) {
+            if (m >= 0) {
+                selectedMotor = m;
+                selectedPort = port;
+            }
+        } else if (port == motorPorts[selectedMotor]) {
+            selectedMotor = -1;
+        } else {
+            moveMotorToPort(selectedMotor, port);
+            selectedMotor = -1;
+            selectedPort = port;
+        }
     } else {
-        moveMotorToPort(selectedMotor, port);
-        selectedMotor = -1;
+        selectedPort = port;
+    }
+}
+
+void handleThreeWireTouch(int x, int y) {
+    const int colW = 168;
+    const int rowH = 34;
+    const int listY = 48;
+
+    if (!inRect(x, y, PANEL_X + 8, listY,
+                2 * colW + 8, 4 * rowH)) {
+        return;
+    }
+
+    int col = (x - (PANEL_X + 8)) / (colW + 8);
+    int row = (y - listY) / rowH;
+
+    if (col < 0 || col > 1 || row < 0 || row > 3) return;
+
+    int index = col * 4 + row;
+    if (index >= 0 && index < NUM_3WIRE) {
+        selectedPort = -(index + 1);
     }
 }
 
 void handleTouch(int x, int y) {
-    // Page buttons
     if (inRect(x, y, BTN_X, 0, BTN_W, 240)) {
         int page = y / BTN_H;
+
         if (page >= 0 && page < NUM_PAGES) {
             currentPage = page;
             selectedMotor = -1;
+            selectedPort = -1;
+            switchPortsMode = false;
         }
         return;
     }
 
     if (currentPage == 0) {
-        handleHomeTouch(x, y);
-    } else if (currentPage >= 2) {
-        int idx = currentPage - 2;
-        if      (inRect(x, y, PBTN_X, PBTN_PLUS_Y,  PBTN_W, PBTN_H)) changePort(idx, +1);
-        else if (inRect(x, y, PBTN_X, PBTN_MINUS_Y, PBTN_W, PBTN_H)) changePort(idx, -1);
-        else if (inRect(x, y, PBTN_X, PBTN_REV_Y,   PBTN_W, PBTN_H)) toggleReverse(idx);
+        handleSmartGridTouch(x, y);
+    } else if (currentPage == 1) {
+        handleThreeWireTouch(x, y);
+    } else if (currentPage == 2) {
+        // Motor grid: selecting a motor only changes the selected card.
+        const int cols = 2;
+        const int w = 125;
+        const int h = 78;
+        const int x0 = PANEL_X + 8;
+        const int y0 = 48;
+
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            int col = i % cols;
+            int row = i / cols;
+            int bx = x0 + col * (w + 8);
+            int by = y0 + row * (h + 8);
+
+            if (inRect(x, y, bx, by, w, h)) {
+                selectedMotor = i;
+                return;
+            }
+        }
+    } else if (currentPage >= 3) {
+        int idx = currentPage - 3;
+        if (idx >= 0 && idx < NUM_MOTORS) {
+            // Motor pages no longer have independent port +/- controls.
+            // Port movement is handled from HOME > SWITCH PORTS.
+        }
     }
 }
 
-// Runs on its own thread so drawing never slows the drive loop.
+/* Runs on its own thread so drawing never slows the drive loop. */
 int screenTask() {
     bool wasPressed = false;
 
     while (true) {
-        // --- touch handling (act once per press) ---
         bool pressed = Brain.Screen.pressing();
+
         if (pressed && !wasPressed) {
             handleTouch(Brain.Screen.xPosition(), Brain.Screen.yPosition());
         }
         wasPressed = pressed;
 
-        // --- draw frame (double-buffered, so no flicker) ---
         takeSnapshot();
+
         Brain.Screen.clearScreen(color::black);
         drawPageButtons();
-        if      (currentPage == 0) drawHomePage();
-        else if (currentPage == 1) drawSummaryPage();
-        else                       drawMotorPage(currentPage - 2);
-        Brain.Screen.render();
 
+        if (currentPage == 0) {
+            drawSmartPortGrid();
+        } else if (currentPage == 1) {
+            drawThreeWirePage();
+        } else if (currentPage == 2) {
+            drawMotorSummaryPage();
+        } else {
+            drawMotorPage(currentPage - 3);
+        }
+
+        Brain.Screen.render();
         this_thread::sleep_for(50);
     }
+
     return 0;
 }
 
