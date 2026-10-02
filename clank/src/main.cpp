@@ -31,28 +31,48 @@ double curve(int input, double exponent) {
 
 /*----------------------------------------------------------------------------*/
 /*  Motors (created at runtime so their ports can be changed from the screen) */
-/*  Index 0,1 = left side.  Index 2,3 = right side.                           */
+/*  Index 0,1 = left side.  2,3 = right side.  4,5 = 5.5W aux motors.         */
 /*                                                                            */
 /*  motorPorts[] is the single source of truth for which port each motor      */
 /*  uses. Moving a motor on the screen updates it and rebuilds the motor on   */
 /*  the new port, so the drive loop follows immediately.                      */
 /*----------------------------------------------------------------------------*/
 
-const int NUM_MOTORS = 4;
+const int NUM_MOTORS = 6;
 const int MIN_PORT = 1;
 const int MAX_PORT = 21;
 
-const char* motorNames[NUM_MOTORS] = { "L Front", "L Back", "R Front", "R Back" };
-const char* motorShort[NUM_MOTORS] = { "LF", "LB", "RF", "RB" };
+// Motor indexes: 0,1 = left drive   2,3 = right drive   4,5 = 5.5W aux motors
+const int AUX_A = 4;
+const int AUX_B = 5;
+
+const char* motorNames[NUM_MOTORS] = { "L Front", "L Back", "R Front", "R Back", "Aux 1", "Aux 2" };
+const char* motorShort[NUM_MOTORS] = { "LF", "LB", "RF", "RB", "A1", "A2" };
 
 // Starting ports (1-21) and directions. Changed live from the Brain screen.
-int  motorPorts[NUM_MOTORS]    = { 3, 2, 4, 1 };
-bool motorReversed[NUM_MOTORS] = { true, true, false, false };
+int  motorPorts[NUM_MOTORS]    = { 3, 2, 4, 1, 5, 6 };
+bool motorReversed[NUM_MOTORS] = { true, true, false, false, false, true };
 
-motor* motors[NUM_MOTORS] = { nullptr, nullptr, nullptr, nullptr };
+// Drive motors use 6:1 cartridges. The 5.5W motors have a fixed 200 rpm gearing,
+// which the SDK treats as 18:1.
+gearSetting motorGears[NUM_MOTORS] = {
+    gearSetting::ratio6_1, gearSetting::ratio6_1,
+    gearSetting::ratio6_1, gearSetting::ratio6_1,
+    gearSetting::ratio18_1, gearSetting::ratio18_1
+};
+
+motor* motors[NUM_MOTORS] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
 
 // Protects the motors[] pointers: the drive loop and the screen thread both use them.
 vex::mutex motorLock;
+
+// Live controller input, written by the drive loop and read by the screen (for the
+// CONTROL panel on the motor pages). motorCommand[] = power sent to each motor, -100..100.
+volatile int  inputFwd  = 0;     // left stick, vertical (Axis3)
+volatile int  inputTurn = 0;     // right stick, horizontal (Axis1)
+volatile bool inputR1   = false; // top right trigger
+volatile bool inputR2   = false; // bottom right trigger
+volatile int  motorCommand[NUM_MOTORS];
 
 // (Re)creates motor i from its current port/reversed settings. Caller must hold motorLock
 // (or be running before the screen thread starts).
@@ -62,7 +82,7 @@ void rebuildMotor(int i) {
         delete motors[i];
     }
     // SDK port indexes are 0-based: PORT1 == 0
-    motors[i] = new motor(motorPorts[i] - 1, gearSetting::ratio6_1, motorReversed[i]);
+    motors[i] = new motor(motorPorts[i] - 1, motorGears[i], motorReversed[i]);
     motors[i]->setStopping(brake);
 }
 
@@ -198,6 +218,9 @@ const int TILE_W = 52;
 const int TILE_H = 56;
 const int TILE_X0 = 112;
 const int TILE_Y0 = 52;
+
+// CONTROL panel on motor pages (right side, x 280..472, y 3..198)
+const int CTRL_X = 280;
 
 // BACK button on diagnostic screens
 const int BACK_X = 370;
@@ -403,6 +426,103 @@ void drawSmartPortGrid() {
     Brain.Screen.printAt(PANEL_X, 236, true, "green=ok red=missing blue=other");
 }
 
+// Shoulder button on the controller graphic. Outlined cyan if this motor uses it,
+// filled with pressedColor while it is held.
+void drawShoulder(int x, const char* label, bool used, bool pressed, color pressedColor) {
+    Brain.Screen.setPenWidth(used ? 2 : 1);
+    Brain.Screen.setPenColor(used ? color::cyan : color(80, 80, 80));
+    Brain.Screen.setFillColor(pressed ? pressedColor : color(30, 30, 30));
+    Brain.Screen.drawRectangle(x, 28, 32, 16);
+
+    Brain.Screen.setFont(mono12);
+    Brain.Screen.setPenColor(used ? color::white : color(110, 110, 110));
+    Brain.Screen.printAt(x + 9, 41, true, "%s", label);
+    Brain.Screen.setPenWidth(1);
+}
+
+// Joystick on the controller graphic. dx/dy are the live stick position (-100..100,
+// dy positive = up). Ringed yellow if this motor uses it.
+void drawStick(int cx, int cy, bool used, int dx, int dy) {
+    color base = used ? color::yellow : color(110, 110, 110);
+
+    Brain.Screen.setPenWidth(used ? 2 : 1);
+    Brain.Screen.setPenColor(base);
+    Brain.Screen.setFillColor(color(20, 20, 20));
+    Brain.Screen.drawCircle(cx, cy, 20);
+
+    Brain.Screen.setPenWidth(1);
+    Brain.Screen.setFillColor(base);
+    Brain.Screen.drawCircle(cx + dx * 14 / 100, cy - dy * 14 / 100, 5);
+}
+
+// Right side of a motor page: which control drives this motor, plus a live input bar.
+void drawControlPanel(int idx) {
+    bool aux = (idx >= AUX_A);
+    int  fwd  = inputFwd;
+    int  turn = inputTurn;
+    bool r1   = inputR1;
+    bool r2   = inputR2;
+    int  cmd  = motorCommand[idx];
+
+    // Header
+    Brain.Screen.setFillColor(color::black);
+    Brain.Screen.setFont(mono15);
+    Brain.Screen.setPenColor(color::cyan);
+    Brain.Screen.printAt(CTRL_X, 16, true, "CONTROL");
+
+    // Controller graphic: shoulder buttons on top, body with two sticks below
+    drawShoulder(292, "L1", false, false, color::green);
+    drawShoulder(328, "L2", false, false, color::green);
+    drawShoulder(392, "R1", aux, r1, color(0, 150, 0));
+    drawShoulder(428, "R2", aux, r2, color(200, 110, 0));
+
+    Brain.Screen.setPenWidth(1);
+    Brain.Screen.setPenColor(color(70, 70, 70));
+    Brain.Screen.setFillColor(color(25, 25, 25));
+    Brain.Screen.drawRectangle(CTRL_X + 8, 48, 176, 72);
+
+    drawStick(326, 88, !aux, 0, fwd);      // left stick: forward / back
+    drawStick(426, 88, !aux, turn, 0);     // right stick: turning
+
+    // What the highlighted controls do
+    Brain.Screen.setFillColor(color::black);
+    Brain.Screen.setFont(mono15);
+    Brain.Screen.setPenColor(color::white);
+    if (aux) {
+        Brain.Screen.printAt(CTRL_X, 136, true, "R1: forward");
+        Brain.Screen.printAt(CTRL_X, 152, true, "R2: reverse");
+    } else {
+        Brain.Screen.printAt(CTRL_X, 136, true, "L stick: drive");
+        Brain.Screen.printAt(CTRL_X, 152, true, "R stick: turn");
+    }
+
+    // Input bar: centered at 0, green to the right (forward), orange to the left (reverse)
+    Brain.Screen.setPenColor(color(170, 170, 170));
+    Brain.Screen.printAt(CTRL_X, 172, true, "INPUT");
+    Brain.Screen.setPenColor(color::white);
+    Brain.Screen.printAt(CTRL_X + 144, 172, true, "%+4d%%", cmd);
+
+    const int barX = CTRL_X, barY = 178, barW = 192, barH = 18;
+    const int mid = barX + barW / 2;
+    int fill = (cmd < 0 ? -cmd : cmd) * (barW / 2 - 1) / 100;
+
+    Brain.Screen.setPenWidth(1);
+    Brain.Screen.setPenColor(color(90, 90, 90));
+    Brain.Screen.setFillColor(color(30, 30, 30));
+    Brain.Screen.drawRectangle(barX, barY, barW, barH);
+
+    if (fill > 0) {
+        color c = (cmd > 0) ? color(0, 160, 0) : color(210, 110, 0);
+        Brain.Screen.setPenColor(c);
+        Brain.Screen.setFillColor(c);
+        if (cmd > 0) Brain.Screen.drawRectangle(mid + 1, barY + 1, fill, barH - 2);
+        else         Brain.Screen.drawRectangle(mid - fill, barY + 1, fill, barH - 2);
+    }
+
+    Brain.Screen.setPenColor(color::white);
+    Brain.Screen.drawLine(mid, barY - 2, mid, barY + barH + 1);
+}
+
 void drawBackButton() {
     Brain.Screen.setFont(mono15);
     drawButton(BACK_X, BACK_Y, BACK_W, BACK_H, "BACK", color(55, 55, 55), 9, 15);
@@ -437,6 +557,7 @@ void drawMotorPage(int idx) {
         Brain.Screen.printAt(10, 222, true, "Position:   %5.0f deg", d.pos);
     }
 
+    drawControlPanel(idx);
     drawBackButton();
 }
 
@@ -590,12 +711,34 @@ int main() {
         if (rightPower > 100) rightPower = 100;
         if (rightPower < -100) rightPower = -100;
 
+        // Aux 5.5W motors: R1 (top right trigger) drives, R2 (bottom right trigger) reverses.
+        // If both are pressed, R1 wins.
+        bool r1 = Controller1.ButtonR1.pressing();
+        bool r2 = Controller1.ButtonR2.pressing();
+        double auxPower = 0;
+        if (r1)      auxPower = 100;
+        else if (r2) auxPower = -100;
+
+        // Share the live input with the screen (CONTROL panel on the motor pages)
+        inputFwd  = fwdAxis;
+        inputTurn = turnAxis;
+        inputR1   = r1;
+        inputR2   = r2;
+        motorCommand[0] = motorCommand[1] = (int)round(leftPower);
+        motorCommand[2] = motorCommand[3] = (int)round(rightPower);
+        motorCommand[AUX_A] = motorCommand[AUX_B] = (int)auxPower;
+
         // Lock so a port change on the screen can't swap a motor out mid-update.
         motorLock.lock();
         motors[0]->spin(forward, leftPower,  percent);   // left front
         motors[1]->spin(forward, leftPower,  percent);   // left back
         motors[2]->spin(forward, rightPower, percent);   // right front
         motors[3]->spin(forward, rightPower, percent);   // right back
+
+        for (int i = AUX_A; i <= AUX_B; i++) {
+            if (auxPower == 0) motors[i]->stop();
+            else               motors[i]->spin(forward, auxPower, percent);
+        }
         motorLock.unlock();
 
         wait(20, msec);
