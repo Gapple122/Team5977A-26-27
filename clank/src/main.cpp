@@ -39,6 +39,7 @@ double curve(int input, double exponent) {
 
 int main() {
     Brain.Screen.print("paul detetected engaging attack mode");
+    
 
     LeftDrive.setStopping(brake);
     RightDrive.setStopping(brake);
