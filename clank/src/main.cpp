@@ -66,6 +66,9 @@ gearSetting motorGears[NUM_MOTORS] = {
 };
 
 motor* motors[NUM_MOTORS] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+// Unassigned motors can still be jogged from their port diagnostic page.
+motor* manualPortMotors[MAX_PORT + 1] = { nullptr };
+volatile int manualPortPower = 0;
 
 // Protects the motors[] pointers: the drive loop and the screen thread both use them.
 vex::mutex motorLock;
@@ -655,6 +658,30 @@ void drawPortDiagnosticPage(int port) {
         Brain.Screen.setPenColor(color(170, 170, 170));
         Brain.Screen.printAt(10, 90, true, "Type ID: %d", portSnap[port].type);
         Brain.Screen.printAt(10, 112, true, "Not used by the robot code.");
+        if (portSnap[port].type == 2) {
+            int power = manualPortPower;
+            Brain.Screen.setPenColor(color(190, 205, 215));
+            Brain.Screen.printAt(10, 150, true, "MOTOR SPEED");
+            Brain.Screen.printAt(135, 150, true, "%+4d%%", power);
+            const int bx = 10, by = 166, bw = 192, bh = 20;
+            const int mid = bx + bw / 2;
+            int fill = (power < 0 ? -power : power) * (bw / 2 - 1) / 100;
+            Brain.Screen.setPenWidth(1);
+            Brain.Screen.setPenColor(color(90, 90, 90));
+            Brain.Screen.setFillColor(color(30, 30, 30));
+            Brain.Screen.drawRectangle(bx, by, bw, bh);
+            if (fill > 0) {
+                color c = power > 0 ? color(0, 160, 0) : color(210, 110, 0);
+                Brain.Screen.setPenColor(c);
+                Brain.Screen.setFillColor(c);
+                if (power > 0) Brain.Screen.drawRectangle(mid + 1, by + 1, fill, bh - 2);
+                else Brain.Screen.drawRectangle(mid - fill, by + 1, fill, bh - 2);
+            }
+            Brain.Screen.setPenColor(color::white);
+            Brain.Screen.drawLine(mid, by - 2, mid, by + bh + 1);
+            Brain.Screen.setPenColor(color(170, 170, 170));
+            Brain.Screen.printAt(10, 202, true, "Hold and drag; release to stop");
+        }
     } else {
         Brain.Screen.setPenColor(color::red);
         Brain.Screen.printAt(10, 62, true, "NO DEVICE DETECTED");
@@ -760,6 +787,7 @@ void clearTouchControl() {
     touchMotorActive = false;
     if (diagnosticMotor >= 0 && diagnosticMotor < NUM_MOTORS)
         motorCommand[diagnosticMotor] = 0;
+    manualPortPower = 0;
     activeTouchControl = TOUCH_NONE;
 }
 
@@ -772,7 +800,10 @@ void updateTouchControl(int x, int y) {
             touchTurn = clampPercent((x - 402) * 5);
             break;
         case TOUCH_SLIDER:
-            touchMotorPower = clampPercent((x - 376) * 100 / 96);
+            if (diagnosticMotor >= 0)
+                touchMotorPower = clampPercent((x - 376) * 100 / 96);
+            else
+                manualPortPower = clampPercent((x - 106) * 100 / 96);
             touchMotorActive = true;
             break;
         default: break;
@@ -808,7 +839,10 @@ void beginTouchControl(int x, int y) {
     else if ((x - 402) * (x - 402) + (y - 86) * (y - 86) <= 19 * 19)
         activeTouchControl = TOUCH_RIGHT_STICK;
     // Momentary motor-speed slider.
-    else if (inRect(x, y, CTRL_X, 176, 192, 20)) activeTouchControl = TOUCH_SLIDER;
+    else if (diagnosticMotor >= 0 && inRect(x, y, CTRL_X, 176, 192, 20)) activeTouchControl = TOUCH_SLIDER;
+    else if (diagnosticMotor < 0 && diagnosticPort >= MIN_PORT && diagnosticPort <= MAX_PORT &&
+             portSnap[diagnosticPort].type == 2 && inRect(x, y, 10, 166, 192, 20))
+        activeTouchControl = TOUCH_SLIDER;
 
     switch (activeTouchControl) {
         case TOUCH_L1: touchL1 = true; break;
@@ -849,7 +883,9 @@ int screenTask() {
             int tx = Brain.Screen.xPosition();
             int ty = Brain.Screen.yPosition();
             if (!wasPressed) handleTouch(tx, ty);
-            else if (currentPage == MOTOR_DIAGNOSTIC_PAGE) updateTouchControl(tx, ty);
+            else if (currentPage == MOTOR_DIAGNOSTIC_PAGE ||
+                     (currentPage == PORT_DIAGNOSTIC_PAGE && activeTouchControl == TOUCH_SLIDER))
+                updateTouchControl(tx, ty);
         } else if (wasPressed) {
             clearTouchControl(); // joystick and speed slider are dead-man controls
         }
@@ -935,6 +971,19 @@ int main() {
 
         // Lock so a port change on the screen can't swap a motor out mid-update.
         motorLock.lock();
+        if (diagnosticPort >= MIN_PORT && diagnosticPort <= MAX_PORT &&
+            motorAtPort(diagnosticPort) < 0 && portSnap[diagnosticPort].type == 2) {
+            if (manualPortMotors[diagnosticPort] == nullptr) {
+                manualPortMotors[diagnosticPort] = new motor(diagnosticPort - 1, ratio18_1, false);
+                manualPortMotors[diagnosticPort]->setStopping(brake);
+            }
+            if (touchMotorActive && currentPage == PORT_DIAGNOSTIC_PAGE) {
+                if (manualPortPower == 0) manualPortMotors[diagnosticPort]->stop();
+                else manualPortMotors[diagnosticPort]->spin(forward, manualPortPower, percent);
+            } else {
+                manualPortMotors[diagnosticPort]->stop();
+            }
+        }
         double drivePower[4] = { leftPower, leftPower, rightPower, rightPower };
         for (int i = 0; i < 4; i++) {
             double power = drivePower[i];
