@@ -209,10 +209,14 @@ const char* deviceShortName(int type) {
 
 const int NUM_3WIRE = 8;
 const char* threeWireNames[NUM_3WIRE] = { "A", "B", "C", "D", "E", "F", "G", "H" };
+// V5 3-wire device types are not discoverable at runtime; configure these labels
+// to match wiring. A-D are configured below as digital outputs, E-H are unset.
 const char* threeWireDevices[NUM_3WIRE] = {
-    "Not set", "Not set", "Not set", "Not set",
+    "Digital out", "Digital out", "Digital out", "Digital out",
     "Not set", "Not set", "Not set", "Not set"
 };
+digital_out* threeWireOutputs[NUM_3WIRE] = { nullptr };
+bool threeWireOutputHigh[NUM_3WIRE] = { false };
 
 /*----------------------------------------------------------------------------*/
 /*  Screen layout (480 x 240)                                                 */
@@ -266,7 +270,8 @@ const int BACK_H = 28;
 enum ScreenPage {
     HOME_PAGE,
     MOTOR_DIAGNOSTIC_PAGE,
-    PORT_DIAGNOSTIC_PAGE
+    PORT_DIAGNOSTIC_PAGE,
+    THREEWIRE_DIAGNOSTIC_PAGE
 };
 
 ScreenPage currentPage = HOME_PAGE;
@@ -274,6 +279,7 @@ int diagnosticMotor = -1;
 int diagnosticPort = -1;
 int selectedMotor = -1;        // motor picked up while SWITCH is on
 int selectedTw = -1;           // highlighted 3-wire row
+int diagnosticTw = -1;
 int threeWireScroll = 0;
 bool switchPortsMode = false;
 bool reversePortsMode = false;
@@ -376,12 +382,12 @@ void drawThreeWireList() {
     }
     Brain.Screen.setPenWidth(1);
 
-    // Scroll buttons (dimmed when they can't scroll any further)
+    // Arrow buttons jump directly to the first or last visible group.
     Brain.Screen.setFont(mono15);
     drawButton(TW_UP_X, TW_ARROW_Y, TW_ARROW_W, TW_ARROW_H, "^",
-               threeWireScroll > 0 ? color(70, 70, 70) : color(25, 25, 25), 9, 15);
+               color(70, 70, 70), 9, 15);
     drawButton(TW_DOWN_X, TW_ARROW_Y, TW_ARROW_W, TW_ARROW_H, "v",
-               threeWireScroll < maxScroll ? color(70, 70, 70) : color(25, 25, 25), 9, 15);
+               color(70, 70, 70), 9, 15);
 }
 
 void drawSmartPortGrid() {
@@ -690,6 +696,60 @@ void drawPortDiagnosticPage(int port) {
     drawBackButton();
 }
 
+bool threeWireControllerPressed(int index) {
+    switch (index) {
+        case 0: return Controller1.ButtonA.pressing();
+        case 1: return Controller1.ButtonB.pressing();
+        case 2: return Controller1.ButtonX.pressing();
+        case 3: return Controller1.ButtonY.pressing();
+        case 4: return Controller1.ButtonUp.pressing();
+        case 5: return Controller1.ButtonDown.pressing();
+        case 6: return Controller1.ButtonLeft.pressing();
+        default: return Controller1.ButtonRight.pressing();
+    }
+}
+
+void drawThreeWireDiagnosticPage(int index) {
+    Brain.Screen.setFillColor(color::black);
+    Brain.Screen.setPenColor(color::cyan);
+    Brain.Screen.setFont(mono20);
+    Brain.Screen.printAt(10, 24, true, "3-WIRE %s", threeWireNames[index]);
+    Brain.Screen.setPenColor(color::white);
+    Brain.Screen.setFont(mono15);
+    Brain.Screen.printAt(10, 48, true, "Device: %s", threeWireDevices[index]);
+    if (index < 4) {
+        const char* mappedName[4] = { "A", "B", "X", "Y" };
+        Brain.Screen.setPenColor(color(170, 170, 170));
+        Brain.Screen.printAt(10, 72, true, "Controller button: %s", mappedName[index]);
+        bool high = threeWireOutputHigh[index];
+        drawButton(10, 92, 90, 34, "HIGH", high ? color(0, 150, 0) : color(45, 45, 45), 9, 15);
+        drawButton(108, 92, 90, 34, "LOW", high ? color(45, 45, 45) : color(150, 0, 0), 9, 15);
+    } else {
+        Brain.Screen.setPenColor(color(170, 170, 170));
+        Brain.Screen.printAt(10, 84, true, "No digital output configured");
+    }
+
+    // Small controller infographic. The mapped button is highlighted and lights while pressed.
+    Brain.Screen.setPenColor(color(105, 120, 132));
+    Brain.Screen.setFillColor(color(27, 35, 43));
+    Brain.Screen.drawRectangle(250, 46, 220, 112);
+    Brain.Screen.setPenColor(color(70, 85, 95));
+    Brain.Screen.drawLine(360, 52, 360, 152);
+    const char* labels[8] = { "A", "B", "X", "Y", "UP", "DN", "LT", "RT" };
+    const int bx[8] = { 386, 421, 351, 386, 286, 286, 268, 304 };
+    const int by[8] = { 86, 103, 103, 120, 60, 112, 86, 86 };
+    for (int i = 0; i < 8; ++i) {
+        bool mapped = index < 4 && i == index;
+        bool pressed = mapped && threeWireControllerPressed(index);
+        drawControlButton(bx[i], by[i], 29, 20, labels[i], mapped,
+                          pressed);
+    }
+    Brain.Screen.setPenColor(color(170, 170, 170));
+    Brain.Screen.setFont(mono12);
+    Brain.Screen.printAt(250, 178, true, "Mapped button drives output HIGH");
+    drawBackButton();
+}
+
 void handleSmartGridTouch(int x, int y) {
     if (inRect(x, y, SWITCH_X, SWITCH_Y, SWITCH_W, SWITCH_H)) {
         if (reversePortsMode) return;
@@ -751,11 +811,11 @@ void handleThreeWireTouch(int x, int y) {
     int maxScroll = NUM_3WIRE - TW_VISIBLE;
 
     if (inRect(x, y, TW_UP_X, TW_ARROW_Y, TW_ARROW_W, TW_ARROW_H)) {
-        if (threeWireScroll > 0) threeWireScroll--;
+        threeWireScroll = 0;
         return;
     }
     if (inRect(x, y, TW_DOWN_X, TW_ARROW_Y, TW_ARROW_W, TW_ARROW_H)) {
-        if (threeWireScroll < maxScroll) threeWireScroll++;
+        threeWireScroll = maxScroll;
         return;
     }
 
@@ -763,7 +823,9 @@ void handleThreeWireTouch(int x, int y) {
 
     int index = threeWireScroll + (y - TW_TOP) / TW_ROW_H;
     if (index >= 0 && index < NUM_3WIRE) {
-        selectedTw = (selectedTw == index) ? -1 : index;
+        selectedTw = index;
+        diagnosticTw = index;
+        currentPage = THREEWIRE_DIAGNOSTIC_PAGE;
     }
 }
 
@@ -811,6 +873,17 @@ void updateTouchControl(int x, int y) {
 }
 
 void beginTouchControl(int x, int y) {
+    if (currentPage == THREEWIRE_DIAGNOSTIC_PAGE) {
+        if (inRect(x, y, BACK_X, BACK_Y, BACK_W, BACK_H)) {
+            currentPage = HOME_PAGE;
+            diagnosticTw = -1;
+        } else if (diagnosticTw >= 0 && diagnosticTw < 4 && inRect(x, y, 10, 92, 90, 34)) {
+            threeWireOutputHigh[diagnosticTw] = true;
+        } else if (diagnosticTw >= 0 && diagnosticTw < 4 && inRect(x, y, 108, 92, 90, 34)) {
+            threeWireOutputHigh[diagnosticTw] = false;
+        }
+        return;
+    }
     if (inRect(x, y, BACK_X, BACK_Y, BACK_W, BACK_H)) {
         currentPage = HOME_PAGE;
         diagnosticMotor = -1;
@@ -897,6 +970,8 @@ int screenTask() {
 
         if (currentPage == MOTOR_DIAGNOSTIC_PAGE && diagnosticMotor >= 0) {
             drawMotorPage(diagnosticMotor);
+        } else if (currentPage == THREEWIRE_DIAGNOSTIC_PAGE && diagnosticTw >= 0 && diagnosticTw < NUM_3WIRE) {
+            drawThreeWireDiagnosticPage(diagnosticTw);
         } else if (currentPage == PORT_DIAGNOSTIC_PAGE &&
                    diagnosticPort >= MIN_PORT && diagnosticPort <= MAX_PORT) {
             drawPortDiagnosticPage(diagnosticPort);
@@ -913,6 +988,10 @@ int screenTask() {
 
 int main() {
     for (int i = 0; i < NUM_MOTORS; i++) rebuildMotor(i);
+    threeWireOutputs[0] = new digital_out(Brain.ThreeWirePort.A);
+    threeWireOutputs[1] = new digital_out(Brain.ThreeWirePort.B);
+    threeWireOutputs[2] = new digital_out(Brain.ThreeWirePort.C);
+    threeWireOutputs[3] = new digital_out(Brain.ThreeWirePort.D);
     for (int p = MIN_PORT; p <= MAX_PORT; p++) probes[p] = new device(p - 1);
 
     thread screenThread(screenTask);
@@ -1012,6 +1091,11 @@ int main() {
             else motors[i]->spin(forward, power, percent);
         }
         motorLock.unlock();
+
+        for (int i = 0; i < 4; ++i) {
+            bool high = threeWireOutputHigh[i] || threeWireControllerPressed(i);
+            threeWireOutputs[i]->set(high);
+        }
 
         wait(20, msec);
     }
